@@ -1,0 +1,254 @@
+---
+title: "3_1 Lect R&Cyto"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+#Using Cytoscape with R
+
+## Section 1: Connect with Cytoscape
+Install packages
+```{r}
+#source("http://bioconductor.org/biocLite.R")
+#biocLite("RCy3")
+library(RCy3)
+library(igraph)
+library(RColorBrewer)
+```
+
+
+These functions are a convenient way to verify connection to Cytoscape
+
+```{r}
+cwd <- demoSimpleGraph()
+
+```
+
+Map a simple network to Cytoscape
+```{r}
+layoutNetwork(cwd, 'force-directed')
+
+# choose any of the other possible layouts e.g.:
+possible.layout.names <- getLayoutNames(cwd)
+layoutNetwork (cwd, possible.layout.names[1])
+
+# Test the connection to Cytoscape.
+ping(cwd)
+```
+
+Switch Styles
+```{r}
+setVisualStyle(cwd, "Marquee")
+
+styles <- getVisualStyleNames(cwd)
+styles
+
+## Set some other styles
+setVisualStyle(cwd, styles[13])
+#setVisualStyle(cwd, styles[9])
+```
+
+##Section 2: Read metagenomics data
+Import data files...
+```{r}
+## scripts for processing located in "inst/data-raw/"
+prok_vir_cor <- read.delim("~/virus_prok_cor_abundant.tsv", stringsAsFactors = FALSE)
+
+## Have a peak at the first 6 rows
+head(prok_vir_cor)
+```
+
+Graph the data, right now it is undirected because we don't have info on direction of interactions.
+```{r}
+g <- graph.data.frame(prok_vir_cor, directed = FALSE)
+
+# check class of g
+class(g)
+g
+
+# now simply plot
+plot(g)
+```
+
+Not very pretty :( We can tune out some attributes using ?igraph.plotting for more details. 
+<br />Here we turn down vertex size from default of 15.
+```{r}
+plot(g, vertex.size=3, vertex.label=NA)
+```
+
+Note that we can query and set vertex edge attributes with V() and E()
+```{r}
+V(g)
+E(g)
+```
+
+Bacteriophage were shotgun sequenced. Let's import the datafile.
+```{r}
+phage_id_affiliation <- read.delim("phage_ids_with_affiliation.tsv")
+head(phage_id_affiliation)
+
+bac_id_affi <- read.delim("prok_tax_from_silva.tsv")
+head(bac_id_affi)
+```
+
+##Section 4: Add taxonimic classifications to the network and sent to Cyto
+For this dataset, some do not have taxonomic data so we set it as "not_class" because RCy3 doesn't like when we send NA to Cyto for some reason (bug might be fixed in later updates?). 
+```{r}
+## Create our gene network 'genenet' for cytoscape
+genenet.nodes <- as.data.frame(vertex.attributes(g))
+
+## not all have classification, so create empty columns
+genenet.nodes$phage_aff <- rep("not_class", nrow(genenet.nodes))
+genenet.nodes$Tax_order <- rep("not_class", nrow(genenet.nodes))
+genenet.nodes$Tax_subfamily <- rep("not_class", nrow(genenet.nodes))
+
+for (row in seq_along(1:nrow(genenet.nodes))){
+  if (genenet.nodes$name[row] %in% phage_id_affiliation$first_sheet.Phage_id_network){
+    id_name <- as.character(genenet.nodes$name[row])
+    aff_to_add <- unique(subset(phage_id_affiliation,
+                                first_sheet.Phage_id_network == id_name,
+                                select = c(phage_affiliation,
+                                           Tax_order,
+                                           Tax_subfamily)))
+    genenet.nodes$phage_aff[row] <- as.character(aff_to_add$phage_affiliation)
+    genenet.nodes$Tax_order[row] <- as.character(aff_to_add$Tax_order)
+    genenet.nodes$Tax_subfamily[row] <- as.character(aff_to_add$Tax_subfamily)
+  }
+}
+```
+Now to add the network data related connections between the orgs, edge data, and prepare to send nodes and edges to Cyto using cyPlot()
+```{r}
+genenet.edges <- data.frame(igraph::as_edgelist(g))
+names(genenet.edges) <- c("name.1", "name.2")
+
+genenet.edges$Weight <- igraph::edge_attr(g)[[1]]
+
+genenet.edges$name.1 <- as.character(genenet.edges$name.1)
+genenet.edges$name.2 <- as.character(genenet.edges$name.2)
+genenet.nodes$name <- as.character(genenet.nodes$name)
+
+ug <- cyPlot(genenet.nodes,genenet.edges)
+```
+
+Now to send the network to Cyto using RCy3
+```{r}
+# Set connecntion and close any old windows
+cy <- CytoscapeConnection()
+deleteAllWindows(cy)
+
+# Create new Tara Oceans window
+cw <- CytoscapeWindow("Tara oceans",
+                      graph = ug,
+                      overwriteWindow = TRUE)
+
+# Send network data to Cyto, now you should see a network on the Cyto window
+displayGraph(cw)
+layoutNetwork(cw)
+fitContent(cw)
+```
+
+##Sectino 5: color network by prokaryotic phylum
+The package Rcolorbrewer will be used o generate a good set of colors for the nodes.
+```{r}
+families_to_colour <- unique(genenet.nodes$prok_tax_phylum)
+families_to_colour <- families_to_colour[!families_to_colour %in% "not_class"]
+node.colour <- RColorBrewer::brewer.pal(length(families_to_colour), "Set3")
+
+```
+
+```{r}
+setNodeColorRule(cw,
+                 "prok_tax_phylum",
+                 families_to_colour,
+                 node.colour,
+                 "lookup",
+                 default.color = "#ffffff")
+```
+```{r}
+
+displayGraph(cw)
+layoutNetwork(cw)
+fitContent(cw)
+```
+
+
+
+Set node shapes to reflect virus or prokaryote.
+```{r}
+shapes_for_nodes <- c("DIAMOND")
+
+phage_names <- grep("ph_",
+                    genenet.nodes$name,
+                    value = TRUE)
+setNodeShapeRule(cw,
+                 "label",
+                 phage_names,
+                 shapes_for_nodes)
+```
+```{r}
+displayGraph(cw)
+fitContent(cw)
+```
+
+Color edges of phage nodes
+```{r}
+setDefaultNodeBorderWidth(cw, 5)
+families_to_colour <- c(" Podoviridae",
+                        " Siphoviridae",
+                        " Myoviridae")
+node.colour <- RColorBrewer::brewer.pal(length(families_to_colour),
+                          "Dark2")
+setNodeBorderColorRule(cw,
+                       "Tax_subfamily",
+                       families_to_colour,
+                       node.colour,
+                       "lookup", 
+                       default.color = "#000000")
+```
+
+```{r}
+displayGraph(cw)
+fitContent(cw)
+```
+
+##Section 6: Setup a layout to minimize overlap of nodes
+Now after all this coloring of the network (you can also do this in Cyto with clicks), let's change the layout so we can see which nodes are connected without overlap.
+```{r}
+# Check layout names of your network
+getLayoutNames(cw)
+```
+```{r}
+getLayoutPropertyNames(cw, layout.name="force-directed")
+```
+
+```{r}
+getLayoutPropertyValue(cw, "force-directed", "defaultSpringLength") 
+```
+```{r}
+getLayoutPropertyValue(cw, "force-directed", "numIterations")  
+```
+
+Once we decide what properties we want, we can set them:
+```{r}
+setLayoutProperties(cw,
+                    layout.name = "force-directed",
+                    list(defaultSpringLength = 20,
+                         "numIterations" = 200))
+                      layoutNetwork(cw,
+              layout.name = "force-directed")
+fitContent(cw)
+```
+
+```{r}
+layoutNetwork(cw, layout.name = "force-directed")
+fitContent(cw)
+```
+
+##Section 7: Examine network properties
+One thing that may be intersting to see represented is nodes that are connected to many different nodes and nodes that have few connectinos. The number of connections is called the **degree**. We can use a gradient of size to quickly visualize nodes with high degree.
+```{r}
+## initiate a new node attribute
+```
+
